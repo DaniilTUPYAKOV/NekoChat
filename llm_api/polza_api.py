@@ -1,5 +1,6 @@
 
 import os
+import aiofiles
 import aiohttp
 import base64
 
@@ -8,21 +9,27 @@ async def upload_file_to_polza(file_path: str, mime_type: str, filename: str, ap
     url = "https://polza.ai/api/v1/storage/upload"
     headers = {"Authorization": f"Bearer {api_key}"}
 
-    async with aiohttp.ClientSession() as session:
-        with open(file_path, "rb") as f:
-            data = aiohttp.FormData()
-            data.add_field('file', f, filename=filename,
-                           content_type=mime_type)
-            data.add_field('purpose', 'assistants')
+    print(f"Загружаем файл: {file_path}")
 
-            async with session.post(url, headers=headers, data=data) as response:
-                if response.status in (200, 201):
-                    result = await response.json()
-                    return result["url"]
-                else:
-                    error_text = await response.text()
-                    raise Exception(
-                        f"Ошибка загрузки файла: {response.status} - {error_text}")
+    # 1. Асинхронно читаем содержимое файла в память
+    async with aiofiles.open(file_path, "rb") as f:
+        file_content = await f.read()
+
+    # 2. Формируем данные для отправки
+    data = aiohttp.FormData()
+    data.add_field('file', file_content, filename=filename, content_type=mime_type)
+    data.add_field('purpose', 'assistants')
+
+    # 3. Асинхронно отправляем запрос
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, headers=headers, data=data) as response:
+            if response.status in (200, 201):
+                result = await response.json()
+                return result["url"]
+            else:
+                # Читаем текст ошибки, если статус не успешный
+                error_text = await response.text()
+                raise Exception(f"Ошибка загрузки файла: {response.status} - {error_text}")
 
 async def prepare_polza_request(messages: list, api_key: str) -> list:
     """
