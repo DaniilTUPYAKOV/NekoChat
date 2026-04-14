@@ -1,12 +1,13 @@
 import asyncio
 from copy import deepcopy
+from datetime import datetime
 import json
 import os
 import shutil
-import io
 import random
 import sqlite3
 
+import aiofiles
 import docx
 from PIL import Image
 from dotenv import load_dotenv
@@ -16,6 +17,7 @@ import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.data import get_data_layer
 from chainlit.types import ThreadDict
+import yaml
 from storage.local_storage_client import LocalStorageClient
 
 # Твои импорты
@@ -50,7 +52,7 @@ openai_client = AsyncOpenAI(
 )
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STORAGE_PATH = os.path.join(BASE_DIR, "user_attachments")
+STORAGE_PATH = os.path.join(BASE_DIR, "public", "user_attachments")
 CONTEXT_PATH = os.path.join(BASE_DIR, "context")
 os.makedirs(STORAGE_PATH, exist_ok=True)
 os.makedirs(CONTEXT_PATH, exist_ok=True)
@@ -99,7 +101,8 @@ def init_db():
 
 init_db()
 
-storage_client = LocalStorageClient(base_path=STORAGE_PATH)
+storage_client = LocalStorageClient(
+    base_path=STORAGE_PATH, base_url="http://localhost:8000/public")
 
 
 @cl.data_layer
@@ -120,42 +123,88 @@ def auth(username: str, password: str):
 
 
 async def _get_context_filepath() -> str:
-    """Формирует имя файла на основе имени треда и его ID."""
+    """Формирует имя файла на основе времени создания чата и его имени."""
     thread_id = cl.context.session.thread_id or cl.context.session.id
     thread_name = "Новый_чат"
+    
+    # По умолчанию берем текущее время (на случай, если тред еще не сохранен в БД)
+    created_at = datetime.now()
 
     data_layer = get_data_layer()
     if data_layer and cl.context.session.thread_id:
         # Получаем данные треда из БД
         thread_data = await data_layer.get_thread(cl.context.session.thread_id)
-        if thread_data and thread_data.get("name"):
-            thread_name = thread_data.get("name")
+        
+        if thread_data:
+            # 1. Достаем имя
+            if thread_data.get("name"):
+                thread_name = thread_data.get("name")
+            
+            # 2. Достаем время создания
+            if thread_data.get("createdAt"):
+                created_at_str = thread_data.get("createdAt")
+                try:
+                    # Chainlit сохраняет время с буквой 'Z' на конце (UTC). 
+                    # Убираем её для совместимости со старыми версиями Python
+                    if created_at_str.endswith('Z'):
+                        created_at_str = created_at_str[:-1]
+                    created_at = datetime.fromisoformat(created_at_str)
+                except ValueError:
+                    pass # Если распарсить не вышло, останется текущее время datetime.now()
 
+    # Форматируем время в безопасную строку: Год-Месяц-День_Часы-Минуты-Секунды
+    # Пример: 2024-04-14_15-30-00
+    time_str = created_at.strftime("%Y-%m-%d_%H-%M-%S")
+
+    # Очищаем имя треда (берем первые 3 слова, убираем спецсимволы)
     thread_name = "_".join(thread_name.split()[:3])
     safe_thread_name = "".join(
-        c for c in thread_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        c for c in thread_name if c.isalnum() or c in (' ', '-', '_')
+    ).strip()
 
-    return os.path.join(CONTEXT_PATH, f"{safe_thread_name}_{thread_id}.json")
+    # Формируем итоговое имя файла. 
+    # Я оставил короткий кусочек thread_id (первые 4 символа) для 100% уникальности, 
+    # чтобы файлы не перезаписались, если два чата созданы в одну секунду.
+    short_id = thread_id[:4] if thread_id else "0000"
+    
+    filename = f"{safe_thread_name}_{time_str}_{short_id}.yaml"
+
+    return os.path.join(CONTEXT_PATH, filename)
 
 
 async def save_context(context_data: list):
-    """Сохраняет контекст в JSON (удобно для ручной правки)."""
+    """Асинхронно сохраняет контекст в YAML (идеально для чтения человеком)."""
     filepath = await _get_context_filepath()
+    # Замените расширение файла на .yaml в _get_context_filepath(), если выберете этот путь
     try:
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(context_data, f, ensure_ascii=False, indent=4)
+        # Превращаем данные в YAML-строку
+        yaml_string = yaml.dump(
+            context_data,
+            allow_unicode=True,       # Сохраняем кириллицу
+            default_flow_style=False, # Разворачиваем списки и словари
+            sort_keys=False           # Сохраняем порядок
+        )
+        
+        async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
+            await f.write(yaml_string)
+            
     except Exception as e:
         print(f"Ошибка при сохранении контекста: {e}")
 
 
 async def load_context() -> list:
-    """Загружает контекст из JSON-файла."""
+    """Асинхронно загружает контекст из YAML-файла."""
     filepath = await _get_context_filepath()
+    
     if not os.path.exists(filepath):
         return []
+        
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
+        async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
+            content = await f.read()
+            # Безопасно загружаем YAML
+            return yaml.safe_load(content) or []
+            
     except Exception as e:
         print(f"Ошибка при загрузке контекста: {e}")
         return []
@@ -174,7 +223,7 @@ async def process_attachments(elements) -> str:
         # --- 1. ИЗОБРАЖЕНИЯ ---
         if "image" in mime:
             img = Image.open(element.path)
-            
+
             # Конвертация для JPEG, чтобы избежать ошибки с альфа-каналом
             if img.mode in ("RGBA", "P") and "png" not in mime:
                 img = img.convert("RGB")
@@ -259,6 +308,19 @@ def restore_settings(settings):
             id="max_tokens", label="Max Tokens", initial=int(settings.get("max_tokens", 8192)), min=100, max=64000, step=100),
     ]
 
+    widgets.append(cl.input_widget.Switch(
+        id="use_system_prompt",
+        label="Использовать системный промпт",
+        initial=settings.get("use_system_prompt", False)
+    ))
+
+    if "use_system_prompt" in settings and settings["use_system_prompt"]:
+        widgets.append(cl.input_widget.TextInput(
+            id="system_prompt",
+            label="Системный промпт",
+            initial=settings.get("system_prompt", SYS_PROMPT)
+        ))  
+
     widgets.append(cl.input_widget.Switch(id="use_reasoning",
                    label="Включить размышления", initial=settings.get("use_reasoning", True)))
 
@@ -276,7 +338,8 @@ def restore_settings(settings):
                 label="Детализация резюме (summary)",
                 values=list(REASONING_SUMMARY.keys()),
                 initial_index=list(REASONING_SUMMARY.keys()).index(
-                    settings.get("reasoning_summary", list(REASONING_SUMMARY.keys())[0])
+                    settings.get("reasoning_summary", list(
+                        REASONING_SUMMARY.keys())[0])
                 )
             ),
             cl.input_widget.Slider(
@@ -349,7 +412,9 @@ def get_default_settings():
             "search_count": 3,
             "web_engine": list(WEB_SEARCH_ENGINES.keys())[0],
             "pdf_parsing": True,
-            "pdf_engine": list(PDF_PARSING_ENGINES.keys())[0]
+            "pdf_engine": list(PDF_PARSING_ENGINES.keys())[0],
+            "use_system_prompt": True,
+            "system_prompt": SYS_PROMPT
         }
     )
 
@@ -373,9 +438,13 @@ async def on_settings_edit(settings):
     if "use_reasoning" in settings and not settings["use_reasoning"] is current_use_reasoning:
         current_settings["use_reasoning"] = settings["use_reasoning"]
         need_to_update = True
-    
+
     if "pdf_parsing" in settings and not settings["pdf_parsing"] is current_settings["pdf_parsing"]:
         current_settings["pdf_parsing"] = settings["pdf_parsing"]
+        need_to_update = True
+
+    if "use_system_prompt" in settings and not settings["use_system_prompt"] is current_settings["use_system_prompt"]:
+        current_settings["use_system_prompt"] = settings["use_system_prompt"]
         need_to_update = True
 
     if need_to_update:
@@ -456,7 +525,10 @@ async def on_message(message: cl.Message):
             await cl.ErrorMessage(content="Я не нашла файла с контекстом. Провожу восстановление...").send()
             context = deepcopy(messages)
         else:
-            context = [{"role": "system", "content": SYS_PROMPT}]
+            if settings["use_system_prompt"]:
+                context = [{"role": "system", "content": settings["system_prompt"]}]
+            else:
+                context = []
         await save_context(context)
 
     # 2. Обработка текста и файлов
@@ -494,7 +566,8 @@ async def on_message(message: cl.Message):
                 extra_body["plugins"] = []
             web_search_plugin = {"id": "web"}
             if "search_count" in settings:
-                web_search_plugin["max_results"] = int(settings["search_count"])
+                web_search_plugin["max_results"] = int(
+                    settings["search_count"])
             web_engine = WEB_SEARCH_ENGINES[settings.get("web_engine")]
             if web_engine != "auto":
                 web_search_plugin["web_engine"] = web_engine
@@ -517,14 +590,14 @@ async def on_message(message: cl.Message):
                 reasoning_params["max_tokens"] = int(r_max_tokens)
 
             extra_body["reasoning"] = reasoning_params
-        
+
         extract_pdf = settings.get("pdf_parsing", False)
         if extract_pdf:
             if not "plugins" in extra_body:
                 extra_body["plugins"] = []
             engine = PDF_PARSING_ENGINES[settings.get("pdf_engine")]
-            extra_body["plugins"].append({"id": "file-parser", "pdf": {"engine": engine}})
-
+            extra_body["plugins"].append(
+                {"id": "file-parser", "pdf": {"engine": engine}})
 
         # Вызов API
         stream = await openai_client.chat.completions.create(
