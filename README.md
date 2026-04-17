@@ -1,5 +1,4 @@
-# Chainlit LLM Client
-
+# NekoChat
 Интерактивное приложение‑чатбот на базе Chainlit для работы с LLM через API Polza.
 
 ## Prerequisites
