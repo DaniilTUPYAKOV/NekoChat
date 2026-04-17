@@ -1,4 +1,5 @@
 # NekoChat
+<img width="504" height="248" alt="image" src="https://github.com/user-attachments/assets/8e9273eb-458e-4c0c-962e-32605b8d7274" />
 Интерактивное приложение‑чатбот на базе Chainlit для работы с LLM через API Polza.
 
 ## Prerequisites
