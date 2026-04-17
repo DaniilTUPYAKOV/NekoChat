@@ -26,7 +26,8 @@ from llm_api.polza_api import prepare_polza_request
 
 # --- НАСТРОЙКИ ---
 load_dotenv()
-API_KEY = os.getenv("API_KEY_POLZA_2")
+# API_KEY = os.getenv("API_KEY_POLZA_3")
+API_KEY = "dloivnzslkbdzsdfrbgdesrfbsewbrfarfdbbbb"
 MODEL_NAME = "gemini-3-pro-preview"
 SYS_PROMPT = """
 [РОЛЬ И ХАРАКТЕР]
@@ -124,49 +125,59 @@ def auth(username: str, password: str):
 
 async def _get_context_filepath() -> str:
     """Формирует имя файла на основе времени создания чата и его имени."""
-    thread_id = cl.context.session.thread_id or cl.context.session.id
+    thread_id = cl.context.session.thread_id
     thread_name = "Новый_чат"
-    
+
     # По умолчанию берем текущее время (на случай, если тред еще не сохранен в БД)
     created_at = datetime.now()
+    need_to_update = True
 
     data_layer = get_data_layer()
-    if data_layer and cl.context.session.thread_id:
+    if data_layer and thread_id:
         # Получаем данные треда из БД
         thread_data = await data_layer.get_thread(cl.context.session.thread_id)
-        
+
         if thread_data:
             # 1. Достаем имя
             if thread_data.get("name"):
                 thread_name = thread_data.get("name")
-            
+
             # 2. Достаем время создания
-            if thread_data.get("createdAt"):
-                created_at_str = thread_data.get("createdAt")
+            metadata = thread_data.get("metadata", False)
+            if metadata:
                 try:
-                    # Chainlit сохраняет время с буквой 'Z' на конце (UTC). 
-                    # Убираем её для совместимости со старыми версиями Python
-                    if created_at_str.endswith('Z'):
-                        created_at_str = created_at_str[:-1]
-                    created_at = datetime.fromisoformat(created_at_str)
-                except ValueError:
-                    pass # Если распарсить не вышло, останется текущее время datetime.now()
+                    metadata = json.loads(metadata)
+                    created_at_str = metadata.get("created_at", None)
+                    if created_at_str:
+                        if created_at_str.endswith('Z'):
+                            created_at_str = created_at_str[:-1]
+                        created_at = datetime.fromisoformat(created_at_str)
+                        need_to_update = False
+                except json.JSONDecodeError or ValueError:
+                    pass
+    
+    if need_to_update:
+        print("created_at is not found")
+        await data_layer.update_thread(
+            thread_id, metadata={"created_at": created_at.isoformat()}
+        )
+
 
     # Форматируем время в безопасную строку: Год-Месяц-День_Часы-Минуты-Секунды
     # Пример: 2024-04-14_15-30-00
     time_str = created_at.strftime("%Y-%m-%d_%H-%M-%S")
 
-    # Очищаем имя треда (берем первые 3 слова, убираем спецсимволы)
+    # # Очищаем имя треда (берем первые 3 слова, убираем спецсимволы)
     thread_name = "_".join(thread_name.split()[:3])
     safe_thread_name = "".join(
         c for c in thread_name if c.isalnum() or c in (' ', '-', '_')
     ).strip()
 
-    # Формируем итоговое имя файла. 
-    # Я оставил короткий кусочек thread_id (первые 4 символа) для 100% уникальности, 
+    # Формируем итоговое имя файла.
+    # Я оставил короткий кусочек thread_id (первые 4 символа) для 100% уникальности,
     # чтобы файлы не перезаписались, если два чата созданы в одну секунду.
     short_id = thread_id[:4] if thread_id else "0000"
-    
+
     filename = f"{safe_thread_name}_{time_str}_{short_id}.yaml"
 
     return os.path.join(CONTEXT_PATH, filename)
@@ -181,13 +192,13 @@ async def save_context(context_data: list):
         yaml_string = yaml.dump(
             context_data,
             allow_unicode=True,       # Сохраняем кириллицу
-            default_flow_style=False, # Разворачиваем списки и словари
+            default_flow_style=False,  # Разворачиваем списки и словари
             sort_keys=False           # Сохраняем порядок
         )
-        
+
         async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
             await f.write(yaml_string)
-            
+
     except Exception as e:
         print(f"Ошибка при сохранении контекста: {e}")
 
@@ -195,16 +206,16 @@ async def save_context(context_data: list):
 async def load_context() -> list:
     """Асинхронно загружает контекст из YAML-файла."""
     filepath = await _get_context_filepath()
-    
+
     if not os.path.exists(filepath):
         return []
-        
+
     try:
         async with aiofiles.open(filepath, "r", encoding="utf-8") as f:
             content = await f.read()
             # Безопасно загружаем YAML
             return yaml.safe_load(content) or []
-            
+
     except Exception as e:
         print(f"Ошибка при загрузке контекста: {e}")
         return []
@@ -303,9 +314,9 @@ async def animate_paws(msg: cl.Message):
 def restore_settings(settings):
     widgets = [
         cl.input_widget.Slider(
-            id="temperature", label="Temperature", initial=float(settings.get("temperature", 0.7)), min=0.0, max=2.0, step=0.1),
+            id="temperature", label="Temperature", initial=float(settings.get("temperature")), min=0.0, max=2.0, step=0.1),
         cl.input_widget.Slider(
-            id="max_tokens", label="Max Tokens", initial=int(settings.get("max_tokens", 8192)), min=100, max=64000, step=100),
+            id="max_tokens", label="Max Tokens", initial=int(settings.get("max_tokens")), min=100, max=64000, step=1),
     ]
 
     widgets.append(cl.input_widget.Switch(
@@ -319,7 +330,7 @@ def restore_settings(settings):
             id="system_prompt",
             label="Системный промпт",
             initial=settings.get("system_prompt", SYS_PROMPT)
-        ))  
+        ))
 
     widgets.append(cl.input_widget.Switch(id="use_reasoning",
                    label="Включить размышления", initial=settings.get("use_reasoning", True)))
@@ -331,41 +342,40 @@ def restore_settings(settings):
                 label="Глубина размышлений (effort)",
                 values=list(REASONING_EFFORT.keys()),
                 initial_index=list(REASONING_EFFORT.keys()).index(
-                    settings.get("reasoning_effort", list(REASONING_EFFORT.keys())[0]))
+                    settings.get("reasoning_effort"))
             ),
             cl.input_widget.Select(
                 id="reasoning_summary",
                 label="Детализация резюме (summary)",
                 values=list(REASONING_SUMMARY.keys()),
                 initial_index=list(REASONING_SUMMARY.keys()).index(
-                    settings.get("reasoning_summary", list(
-                        REASONING_SUMMARY.keys())[0])
+                    settings.get("reasoning_summary")
                 )
             ),
             cl.input_widget.Slider(
                 id="reasoning_max_tokens",
                 label="Лимит токенов мыслей (0 = авто)",
-                initial=0,
+                initial=int(settings.get("reasoning_max_tokens")),
                 min=0,
                 max=8000,
-                step=500
+                step=1
             ),
             cl.input_widget.Switch(
                 id="reasoning_exclude",
                 label="Скрыть мысли из ответа (exclude)",
-                initial=False
+                initial=settings.get("reasoning_exclude")
             ),
         ])
 
     widgets.append(cl.input_widget.Switch(
-        id="web_search", label="Включить поиск по интернету", initial=settings.get("web_search", True)))
+        id="web_search", label="Включить поиск по интернету", initial=settings.get("web_search")))
 
     if "web_search" in settings and settings["web_search"]:
         widgets.extend([
             cl.input_widget.Slider(
                 id="search_count",
                 label="Количество запросов поиска",
-                initial=int(settings.get("search_count", 3)),
+                initial=int(settings.get("search_count")),
                 min=1,
                 max=10,
                 step=1,
@@ -375,12 +385,12 @@ def restore_settings(settings):
                 label="Система поиска (Web Engine)",
                 values=list(WEB_SEARCH_ENGINES.keys()),
                 initial_index=list(WEB_SEARCH_ENGINES.keys()).index(
-                    settings.get("web_engine", list(WEB_SEARCH_ENGINES.keys())[0])),
+                    settings.get("web_engine")),
             )
         ])
 
     widgets.append(cl.input_widget.Switch(
-        id="pdf_parsing", label="Извлечь данные из PDF", initial=settings.get("pdf_parsing", True)))
+        id="pdf_parsing", label="Извлечь данные из PDF", initial=settings.get("pdf_parsing")))
 
     if "pdf_parsing" in settings and settings["pdf_parsing"]:
         widgets.extend([
@@ -389,8 +399,7 @@ def restore_settings(settings):
                 label="Система извлечения (PDF Engine)",
                 values=list(PDF_PARSING_ENGINES.keys()),
                 initial_index=list(PDF_PARSING_ENGINES.keys()).index(
-                    settings.get("pdf_engine", list(
-                        PDF_PARSING_ENGINES.keys())[0])
+                    settings.get("pdf_engine")
                 ),
             )
         ])
@@ -428,8 +437,8 @@ async def on_chat_start():
 @cl.on_settings_edit
 async def on_settings_edit(settings):
     current_settings = cl.user_session.get("settings")
-    current_web_search = current_settings.get("web_search", None)
-    current_use_reasoning = current_settings.get("use_reasoning", None)
+    current_web_search = current_settings.get("web_search")
+    current_use_reasoning = current_settings.get("use_reasoning")
     need_to_update = False
     if "web_search" in settings and not settings["web_search"] is current_web_search:
         current_settings["web_search"] = settings["web_search"]
@@ -468,7 +477,8 @@ async def setup_agent(settings):
     await cl.ChatSettings(widgets).send()
 
     # Сохраняем актуальные настройки в сессию, чтобы использовать их при генерации ответов
-    cl.user_session.set("app_settings", settings)
+    print(settings)
+    cl.user_session.set("settings", settings)
     tread_id = cl.context.session.thread_id
     data_layer = get_data_layer()
     await data_layer.update_thread(tread_id, metadata={"settings": json.dumps(settings)})
@@ -526,7 +536,8 @@ async def on_message(message: cl.Message):
             context = deepcopy(messages)
         else:
             if settings["use_system_prompt"]:
-                context = [{"role": "system", "content": settings["system_prompt"]}]
+                context = [
+                    {"role": "system", "content": settings["system_prompt"]}]
             else:
                 context = []
         await save_context(context)
@@ -581,17 +592,17 @@ async def on_message(message: cl.Message):
             reasoning_params = {
                 "effort": REASONING_EFFORT[settings.get("reasoning_effort")],
                 "summary": REASONING_SUMMARY[settings.get("reasoning_summary")],
-                "exclude": settings.get("reasoning_exclude", False)
+                "exclude": settings.get("reasoning_exclude")
             }
 
             # Добавляем max_tokens только если лимит больше 0
-            r_max_tokens = settings.get("reasoning_max_tokens", 0)
+            r_max_tokens = settings.get("reasoning_max_tokens")
             if r_max_tokens > 0:
                 reasoning_params["max_tokens"] = int(r_max_tokens)
 
             extra_body["reasoning"] = reasoning_params
 
-        extract_pdf = settings.get("pdf_parsing", False)
+        extract_pdf = settings.get("pdf_parsing")
         if extract_pdf:
             if not "plugins" in extra_body:
                 extra_body["plugins"] = []
