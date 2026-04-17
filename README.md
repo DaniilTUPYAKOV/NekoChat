@@ -14,8 +14,8 @@
 ### Шаг 1. Клонирование репозитория
 
 ```bash
-git clone <URL-вашего-репозитория>
-cd <название-папки-проекта>
+git clone https://github.com/DaniilTUPYAKOV/NekoChat.git
+cd NekoChat
 ```
 Шаг 2. Создание и активация виртуального окружения
 Windows:
