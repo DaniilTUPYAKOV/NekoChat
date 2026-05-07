@@ -50,6 +50,7 @@ APP_PASSWORD=your_desired_password
 Описание переменных:
 
 API_KEY_POLZA — API‑ключ для доступа к сервису Polza API.
+
 API_KEY_PROXY — API‑ключ для доступа к сервису Proxy API.
 
 CHAINLIT_AUTH_SECRET — секретный ключ для аутентификации в Chainlit. Должен быть длинной случайной строкой.
