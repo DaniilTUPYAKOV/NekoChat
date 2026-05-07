@@ -26,7 +26,7 @@ from llm_api.polza_api import prepare_polza_request
 
 # --- НАСТРОЙКИ ---
 load_dotenv()
-API_KEY = os.getenv("API_KEY_POLZA")
+API_KEY = os.getenv("API_KEY_POLZA_3")
 MODEL_NAME = "gemini-3-pro-preview"
 SYS_PROMPT = """
 [РОЛЬ И ХАРАКТЕР]
@@ -85,6 +85,12 @@ REASONING_SUMMARY = {
     "Подробное резюме": "detailed",
 }
 
+AVAILABLE_MODELS = {
+    "Gemini 3.1 Pro Preview": "gemini-3.1-pro-preview",
+    "Gemini 3 Pro Preview": "gemini-3-pro-preview",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    # Можешь добавить сюда любые другие модели, которые поддерживает Polza API
+}
 
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ (Для UI и Авторизации) ---
 
@@ -316,10 +322,21 @@ async def animate_paws(msg: cl.Message):
         pass
 
 # --- ЛОГИКА ЧАТА ---
-
-
 def restore_settings(settings):
+    # Безопасное получение индекса модели
+    model_key = settings.get("model_name")
+    try:
+        model_index = list(AVAILABLE_MODELS.keys()).index(model_key)
+    except ValueError:
+        model_index = 0
+
     widgets = [
+        cl.input_widget.Select(
+            id="model_name",
+            label="Модель ИИ",
+            values=list(AVAILABLE_MODELS.keys()),
+            initial_index=model_index
+        ),
         cl.input_widget.Slider(
             id="temperature", label="Temperature", initial=float(settings.get("temperature")), min=0.0, max=2.0, step=0.1),
         cl.input_widget.Slider(
@@ -417,6 +434,7 @@ def restore_settings(settings):
 def get_default_settings():
     return restore_settings(
         {
+            "model_name": list(AVAILABLE_MODELS.keys())[0], # Берет первую модель из словаря по умолчанию
             "temperature": 0.7,
             "max_tokens": 8192,
             "use_reasoning": True,
@@ -569,7 +587,7 @@ async def on_message(message: cl.Message):
     # Флаги состояний
     is_thinking_started = False
     is_answer_started = False
-    SEPARATOR = "\n\n---\n\n"  # Разделитель между мыслями и ответом
+    final_text = []
 
     try:
         # 4. Вызов API
@@ -617,13 +635,16 @@ async def on_message(message: cl.Message):
                 {"id": "file-parser", "pdf": {"engine": engine}})
 
         # Вызов API
+        selected_model_key = settings.get("model_name", list(AVAILABLE_MODELS.keys())[0])
+        actual_model_id = AVAILABLE_MODELS.get(selected_model_key, "gemini-3-pro-preview")
+
+        # Вызов API
         stream = await openai_client.chat.completions.create(
-            model=MODEL_NAME,
+            model=actual_model_id,
             messages=openai_messages,
             temperature=settings.get("temperature", 0.7),
             max_tokens=int(settings.get("max_tokens", 2000)),
             stream=True,
-            # Если extra_body пустой, передаем None
             extra_body=extra_body if extra_body else None
         )
 
@@ -668,17 +689,13 @@ async def on_message(message: cl.Message):
                     # Выходим из цитаты двумя переносами и ставим наш разделитель
                     await msg.stream_token("\n\n---\n\n")
                     is_answer_started = True
-
+                final_text.append(content_chunk)
                 await msg.stream_token(content_chunk)
 
         await msg.update()
 
         # 6. Сохраняем ТОЛЬКО финальный ответ в контекст
-        final_text = msg.content
-        if is_thinking_started and is_answer_started:
-            # Отрезаем размышления по разделителю, берем только последнюю часть
-            final_text = msg.content.split(SEPARATOR)[-1].strip()
-
+        final_text = "".join(final_text).strip()
         context.append({"role": "assistant", "content": final_text})
 
     except Exception as e:
