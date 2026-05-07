@@ -86,7 +86,15 @@ chainlit run app.py
 
 Каждый следующий запуск производится через консоль, открытую в директории с файлом app.py с помощью двух команд:
 
+Windows:
+
 ```bash
 my_chainlit_app\Scripts\activate
+chainlit run app.py
+```
+macOS/Linux:
+
+```bash
+source my_chainlit_app/bin/activate
 chainlit run app.py
 ```
