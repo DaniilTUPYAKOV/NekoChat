@@ -26,8 +26,7 @@ from llm_api.polza_api import prepare_polza_request
 
 # --- НАСТРОЙКИ ---
 load_dotenv()
-API_KEY = os.getenv("API_KEY_POLZA_3")
-MODEL_NAME = "gemini-3-pro-preview"
+API_KEY = os.getenv("API_KEY_POLZA")
 SYS_PROMPT = """
 [РОЛЬ И ХАРАКТЕР]
 Ты — умный, надежный и высокоточный ИИ-ассистент в приложении NekoChat. Твой абсолютный приоритет — адекватность, экспертность и помощь в решении серьезных жизненных и рабочих задач, ты подстраиваешься к каждому человеку по-своему.
