@@ -42,13 +42,15 @@ pip install -r requirements.txt
 
 ```env
 API_KEY_POLZA=your_actual_polza_api_key
+API_KEY_PROXY=your_actual_proxy_api_key
 CHAINLIT_AUTH_SECRET=your_secret_auth_string
 APP_USERNAME=your_desired_username
 APP_PASSWORD=your_desired_password
 ```
 Описание переменных:
 
-API_KEY_POLZA — API‑ключ для доступа к сервису Polza (или другому LLM‑провайдеру).
+API_KEY_POLZA — API‑ключ для доступа к сервису Polza API.
+API_KEY_PROXY — API‑ключ для доступа к сервису Proxy API.
 
 CHAINLIT_AUTH_SECRET — секретный ключ для аутентификации в Chainlit. Должен быть длинной случайной строкой.
 

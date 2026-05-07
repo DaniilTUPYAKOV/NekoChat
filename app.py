@@ -12,21 +12,25 @@ import docx
 from PIL import Image
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from google import genai
+from google.genai import types
 
 import chainlit as cl
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from chainlit.data import get_data_layer
 from chainlit.types import ThreadDict
 import yaml
+from llm_api.genai_api import prepare_google_request
 from storage.local_storage_client import LocalStorageClient
 
-# Твои импорты
+
 from llm_api.polza_api import prepare_polza_request
 
 
 # --- НАСТРОЙКИ ---
 load_dotenv()
-API_KEY = os.getenv("API_KEY_POLZA")
+API_KEY_POLZA = os.getenv("API_KEY_POLZA")
+PROXY_API_KEY = os.getenv("API_KEY_PROXY")
 SYS_PROMPT = """
 [РОЛЬ И ХАРАКТЕР]
 Ты — умный, надежный и высокоточный ИИ-ассистент в приложении NekoChat. Твой абсолютный приоритет — адекватность, экспертность и помощь в решении серьезных жизненных и рабочих задач, ты подстраиваешься к каждому человеку по-своему.
@@ -45,9 +49,11 @@ SYS_PROMPT = """
 # SYS_PROMPT = "Ты — умный, надежный и высокоточный ИИ-ассистент в приложении NekoChat."
 
 openai_client = AsyncOpenAI(
-    api_key=API_KEY,
+    api_key=API_KEY_POLZA,
     base_url="https://api.polza.ai/v1"
 )
+
+genai_client = genai.Client(api_key=PROXY_API_KEY, http_options={"base_url": "https://api.proxyapi.ru/google"})
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_PATH = os.path.join(BASE_DIR, "public", "user_attachments")
@@ -84,11 +90,18 @@ REASONING_SUMMARY = {
     "Подробное резюме": "detailed",
 }
 
-AVAILABLE_MODELS = {
+PROVIDERS = ["Polza API", "Proxy API"]
+
+POLZA_MODELS = {
     "Gemini 3.1 Pro Preview": "gemini-3.1-pro-preview",
     "Gemini 3 Pro Preview": "gemini-3-pro-preview",
     "Gemini 2.5 Pro": "gemini-2.5-pro",
-    # Можешь добавить сюда любые другие модели, которые поддерживает Polza API
+}
+
+PROXY_MODELS = {
+    "Gemini 3.1 Pro Preview": "gemini-3.1-pro-preview",
+    "Gemini 3 Pro Preview": "gemini-3-pro-preview",
+    "Gemini 2.5 Pro": "gemini-2.5-pro"
 }
 
 # --- ИНИЦИАЛИЗАЦИЯ БАЗЫ (Для UI и Авторизации) ---
@@ -322,18 +335,30 @@ async def animate_paws(msg: cl.Message):
 
 # --- ЛОГИКА ЧАТА ---
 def restore_settings(settings):
+    provider = settings.get("provider", "Polza API")
+    
+    # Выбираем правильный словарь моделей
+    available_models = POLZA_MODELS if provider == "Polza API" else PROXY_MODELS
+
     # Безопасное получение индекса модели
     model_key = settings.get("model_name")
-    try:
-        model_index = list(AVAILABLE_MODELS.keys()).index(model_key)
-    except ValueError:
-        model_index = 0
+    if model_key not in available_models:
+        model_key = list(available_models.keys())[0]
+        settings["model_name"] = model_key # Обновляем в словаре, если старая модель не подходит
+
+    model_index = list(available_models.keys()).index(model_key)
 
     widgets = [
         cl.input_widget.Select(
+            id="provider",
+            label="Провайдер API",
+            values=PROVIDERS,
+            initial_index=PROVIDERS.index(provider)
+        ),
+        cl.input_widget.Select(
             id="model_name",
             label="Модель ИИ",
-            values=list(AVAILABLE_MODELS.keys()),
+            values=list(available_models.keys()),
             initial_index=model_index
         ),
         cl.input_widget.Slider(
@@ -433,7 +458,8 @@ def restore_settings(settings):
 def get_default_settings():
     return restore_settings(
         {
-            "model_name": list(AVAILABLE_MODELS.keys())[0], # Берет первую модель из словаря по умолчанию
+            "provider": "Polza API", # Провайдер по умолчанию
+            "model_name": list(POLZA_MODELS.keys())[0],
             "temperature": 0.7,
             "max_tokens": 8192,
             "use_reasoning": True,
@@ -461,33 +487,38 @@ async def on_chat_start():
 @cl.on_settings_edit
 async def on_settings_edit(settings):
     current_settings = cl.user_session.get("settings")
-    current_web_search = current_settings.get("web_search")
-    current_use_reasoning = current_settings.get("use_reasoning")
     need_to_update = False
-    if "web_search" in settings and not settings["web_search"] is current_web_search:
+    
+    # --- НОВАЯ ЛОГИКА: Смена провайдера ---
+    if "provider" in settings and settings["provider"] != current_settings.get("provider"):
+        current_settings["provider"] = settings["provider"]
+        # При смене провайдера сбрасываем модель на первую доступную для этого провайдера
+        new_models = POLZA_MODELS if settings["provider"] == "Polza API" else PROXY_MODELS
+        current_settings["model_name"] = list(new_models.keys())[0]
+        settings["model_name"] = current_settings["model_name"] # Важно обновить и входящий словарь
+        need_to_update = True
+
+    # --- СТАРАЯ ЛОГИКА ---
+    if "web_search" in settings and settings["web_search"] != current_settings.get("web_search"):
         current_settings["web_search"] = settings["web_search"]
         need_to_update = True
 
-    if "use_reasoning" in settings and not settings["use_reasoning"] is current_use_reasoning:
+    if "use_reasoning" in settings and settings["use_reasoning"] != current_settings.get("use_reasoning"):
         current_settings["use_reasoning"] = settings["use_reasoning"]
         need_to_update = True
 
-    if "pdf_parsing" in settings and not settings["pdf_parsing"] is current_settings["pdf_parsing"]:
+    if "pdf_parsing" in settings and settings["pdf_parsing"] != current_settings.get("pdf_parsing"):
         current_settings["pdf_parsing"] = settings["pdf_parsing"]
         need_to_update = True
 
-    if "use_system_prompt" in settings and not settings["use_system_prompt"] is current_settings["use_system_prompt"]:
+    if "use_system_prompt" in settings and settings["use_system_prompt"] != current_settings.get("use_system_prompt"):
         current_settings["use_system_prompt"] = settings["use_system_prompt"]
         need_to_update = True
 
     if need_to_update:
-        cl.user_session.set("settings", current_settings)
-        # Формируем базовый список виджетов (он должен включать сам переключатель,
-        # чтобы сохранить его состояние)
         current_settings.update(settings)
+        cl.user_session.set("settings", current_settings)
         widgets = restore_settings(current_settings)
-
-        # Динамически обновляем панель настроек в интерфейсе
         await cl.ChatSettings(widgets).send()
 
 
@@ -589,108 +620,150 @@ async def on_message(message: cl.Message):
     final_text = []
 
     try:
-        # 4. Вызов API
-        openai_messages = await prepare_polza_request(context, API_KEY)
+        provider = settings.get("provider", "Polza API")
 
-        extra_body = {}
+        # ==========================================
+        # ВАРИАНТ 1: POLZA API
+        # ==========================================
+        if provider == "Polza API":
+            openai_messages = await prepare_polza_request(context, API_KEY_POLZA)
+            extra_body = {}
 
-        # --- Подключение плагинов веб-поиска ---
-        if settings.get("web_search") == True:
-            if not "plugins" in extra_body:
-                extra_body["plugins"] = []
-            web_search_plugin = {"id": "web"}
-            if "search_count" in settings:
-                web_search_plugin["max_results"] = int(
-                    settings["search_count"])
-            web_engine = WEB_SEARCH_ENGINES[settings.get("web_engine")]
-            if web_engine != "auto":
-                web_search_plugin["web_engine"] = web_engine
-            extra_body["plugins"].append(web_search_plugin)
+            # --- Подключение плагинов веб-поиска ---
+            if settings.get("web_search") == True:
+                if not "plugins" in extra_body:
+                    extra_body["plugins"] = []
+                web_search_plugin = {"id": "web"}
+                if "search_count" in settings:
+                    web_search_plugin["max_results"] = int(
+                        settings["search_count"])
+                web_engine = WEB_SEARCH_ENGINES[settings.get("web_engine")]
+                if web_engine != "auto":
+                    web_search_plugin["web_engine"] = web_engine
+                extra_body["plugins"].append(web_search_plugin)
 
-        # --- Подключение размышлений по ФЛАГУ ---
-        # Читаем наш новый переключатель (по умолчанию True, если настройки еще не прогрузились)
-        use_reasoning = settings.get("use_reasoning", None)
+            # --- Подключение размышлений по ФЛАГУ ---
+            # Читаем наш новый переключатель (по умолчанию True, если настройки еще не прогрузились)
+            use_reasoning = settings.get("use_reasoning", None)
 
-        if use_reasoning:
-            reasoning_params = {
-                "effort": REASONING_EFFORT[settings.get("reasoning_effort")],
-                "summary": REASONING_SUMMARY[settings.get("reasoning_summary")],
-                "exclude": settings.get("reasoning_exclude")
+            if use_reasoning:
+                reasoning_params = {
+                    "effort": REASONING_EFFORT[settings.get("reasoning_effort")],
+                    "summary": REASONING_SUMMARY[settings.get("reasoning_summary")],
+                    "exclude": settings.get("reasoning_exclude")
+                }
+
+                # Добавляем max_tokens только если лимит больше 0
+                r_max_tokens = settings.get("reasoning_max_tokens")
+                if r_max_tokens > 0:
+                    reasoning_params["max_tokens"] = int(r_max_tokens)
+
+                extra_body["reasoning"] = reasoning_params
+
+            extract_pdf = settings.get("pdf_parsing")
+            if extract_pdf:
+                if not "plugins" in extra_body:
+                    extra_body["plugins"] = []
+                engine = PDF_PARSING_ENGINES[settings.get("pdf_engine")]
+                extra_body["plugins"].append(
+                    {"id": "file-parser", "pdf": {"engine": engine}})
+
+            selected_model_key = settings.get("model_name", list(POLZA_MODELS.keys())[0])
+            actual_model_id = POLZA_MODELS.get(selected_model_key, "gemini-3-pro-preview")
+
+            stream = await openai_client.chat.completions.create(
+                model=actual_model_id,
+                messages=openai_messages,
+                temperature=settings.get("temperature", 0.7),
+                max_tokens=int(settings.get("max_tokens", 2000)),
+                stream=True,
+                extra_body=extra_body if extra_body else None
+            )
+
+            is_first_token = True
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+                content_chunk = getattr(delta, "content", None)
+
+                reasoning_chunk = None
+                if hasattr(delta, "model_extra") and delta.model_extra:
+                    reasoning_chunk = delta.model_extra.get("reasoning")
+                if reasoning_chunk is None:
+                    reasoning_chunk = getattr(delta, "reasoning", None)
+
+                if reasoning_chunk:
+                    if is_first_token:
+                        animation_task.cancel()
+                        msg.content = "> 💭 *Мои мысли:*\n> "
+                        is_first_token = False
+                        is_thinking_started = True
+                    formatted_chunk = reasoning_chunk.replace('\n', '\n> ')
+                    await msg.stream_token(formatted_chunk)
+
+                if content_chunk:
+                    if is_first_token:
+                        animation_task.cancel()
+                        msg.content = ""
+                        is_first_token = False
+                    if is_thinking_started and not is_answer_started:
+                        await msg.stream_token("\n\n---\n\n")
+                        is_answer_started = True
+                    final_text.append(content_chunk)
+                    await msg.stream_token(content_chunk)
+
+
+        # ==========================================
+        # ВАРИАНТ 2: GOOGLE GENAI
+        # ==========================================
+        elif provider == "Proxy API":
+            if not genai_client:
+                raise ValueError("API ключ для Google GenAI не настроен!")
+
+            # 1. Подготовка сообщений
+            google_contents, system_instruction = prepare_google_request(context)
+
+            # 2. Настройка конфигурации
+            config_args = {
+                "temperature": settings.get("temperature", 0.7),
+                "max_output_tokens": int(settings.get("max_tokens", 8192)),
             }
+            
+            if settings.get("use_system_prompt") and system_instruction:
+                config_args["system_instruction"] = system_instruction
 
-            # Добавляем max_tokens только если лимит больше 0
-            r_max_tokens = settings.get("reasoning_max_tokens")
-            if r_max_tokens > 0:
-                reasoning_params["max_tokens"] = int(r_max_tokens)
+            # Подключение веб-поиска Google (нативный)
+            if settings.get("web_search"):
+                config_args["tools"] = [{"google_search": {}}]
 
-            extra_body["reasoning"] = reasoning_params
+            config = types.GenerateContentConfig(**config_args)
 
-        extract_pdf = settings.get("pdf_parsing")
-        if extract_pdf:
-            if not "plugins" in extra_body:
-                extra_body["plugins"] = []
-            engine = PDF_PARSING_ENGINES[settings.get("pdf_engine")]
-            extra_body["plugins"].append(
-                {"id": "file-parser", "pdf": {"engine": engine}})
+            # 3. Выбор модели
+            selected_model_key = settings.get("model_name", list(PROXY_MODELS.keys())[0])
+            actual_model_id = PROXY_MODELS.get(selected_model_key, None)
 
-        # Вызов API
-        selected_model_key = settings.get("model_name", list(AVAILABLE_MODELS.keys())[0])
-        actual_model_id = AVAILABLE_MODELS.get(selected_model_key, "gemini-3-pro-preview")
+            # 4. Асинхронный вызов API
+            stream = await genai_client.aio.models.generate_content_stream(
+                model=actual_model_id,
+                contents=google_contents,
+                config=config
+            )
 
-        # Вызов API
-        stream = await openai_client.chat.completions.create(
-            model=actual_model_id,
-            messages=openai_messages,
-            temperature=settings.get("temperature", 0.7),
-            max_tokens=int(settings.get("max_tokens", 2000)),
-            stream=True,
-            extra_body=extra_body if extra_body else None
-        )
-
-        is_first_token = True
-
-        # 5. Обработка стрима в ЕДИНОЕ сообщение с фоном для мыслей
-        async for chunk in stream:
-            if not chunk.choices:
-                continue
-
-            delta = chunk.choices[0].delta
-            content_chunk = getattr(delta, "content", None)
-
-            reasoning_chunk = None
-            if hasattr(delta, "model_extra") and delta.model_extra:
-                reasoning_chunk = delta.model_extra.get("reasoning")
-            if reasoning_chunk is None:
-                reasoning_chunk = getattr(delta, "reasoning", None)
-
-            # --- СТРИМИМ РАЗМЫШЛЕНИЯ (В БЛОКЕ ЦИТАТЫ) ---
-            if reasoning_chunk:
-                if is_first_token:
-                    animation_task.cancel()
-                    # Начинаем Markdown-цитату
-                    msg.content = "> 💭 *Мои мысли:*\n> "
-                    is_first_token = False
-                    is_thinking_started = True
-
-                # Если модель выдает перенос строки, добавляем символ цитаты
-                # чтобы фон не прерывался на новых абзацах
-                formatted_chunk = reasoning_chunk.replace('\n', '\n> ')
-                await msg.stream_token(formatted_chunk)
-
-            # --- СТРИМИМ ОСНОВНОЙ ОТВЕТ ---
-            if content_chunk:
+            is_first_token = True
+            async for chunk in stream:
                 if is_first_token:
                     animation_task.cancel()
                     msg.content = ""
                     is_first_token = False
 
-                if is_thinking_started and not is_answer_started:
-                    # Выходим из цитаты двумя переносами и ставим наш разделитель
-                    await msg.stream_token("\n\n---\n\n")
-                    is_answer_started = True
-                final_text.append(content_chunk)
-                await msg.stream_token(content_chunk)
+                # Извлекаем текст (Google SDK сам собирает текст из частей)
+                if chunk.text:
+                    final_text.append(chunk.text)
+                    await msg.stream_token(chunk.text)
 
+        # Обновляем UI после завершения стрима
         await msg.update()
 
         # 6. Сохраняем ТОЛЬКО финальный ответ в контекст
